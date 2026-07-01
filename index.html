@@ -267,6 +267,7 @@ table.data-table tbody tr:hover{background:#f8f5f0;}
         <div style="margin-bottom:8px;display:flex;gap:10px;align-items:center;">
           <button class="btn primary" id="uploadAllBtn">すべてアップロード</button>
           <button class="btn" id="uploadClearBtn">選択をクリア</button>
+          <button class="btn" id="refreshDashboardBtn" title="スプシの最新データをダッシュボードに反映">🔄 ダッシュボード更新</button>
         </div>
         <div class="progress-wrap" id="progressWrap">
           <div style="font-size:12px;color:var(--muted);margin-bottom:4px;" id="progressLabel">処理中...</div>
@@ -572,20 +573,31 @@ function extractPeriod(rows, keyword) {
 async function gasGet(params) {
   const url = getGasUrl();
   if (!url) return { ok: false, error: 'GAS URLが未設定です' };
-  const qs = new URLSearchParams(params).toString();
-  const res = await fetch(url + '?' + qs);
-  return res.json();
+  // GAS WebアプリはGETレスポンスをキャッシュする場合があるため
+  // タイムスタンプを付与してキャッシュを回避する
+  const bustedParams = { ...params, _t: Date.now() };
+  const qs = new URLSearchParams(bustedParams).toString();
+  try {
+    const res = await fetch(url + '?' + qs);
+    return await res.json();
+  } catch (err) {
+    return { ok: false, error: '通信エラー: ' + err.message };
+  }
 }
 
 async function gasPost(payload) {
   const url = getGasUrl();
   if (!url) return { ok: false, error: 'GAS URLが未設定です' };
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(payload),
-  });
-  return res.json();
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (err) {
+    return { ok: false, error: '通信エラー: ' + err.message };
+  }
 }
 
 /* ===================== GASへのデータ変換・アップロード ===================== */
@@ -1067,9 +1079,15 @@ async function uploadAll() {
   if (errors.length > 0) {
     showAlert('uploadAlerts', 'エラー: ' + errors.join(' / '), 'error');
   } else {
-    showAlert('uploadAlerts', `${done}件の帳票をアップロードしました。ダッシュボードに反映されます。`, 'success');
+    showAlert('uploadAlerts', `${done}件の帳票をアップロードしました。ダッシュボードを更新中...`, 'success');
+    // GAS側のスプレッドシートへの書き込みが確定するまで少し待機してから再取得する
+    // (GASは非同期書き込みのため即時取得すると古いキャッシュが返ることがある)
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    // KPIを確実に再計算させる
+    await gasPost({ action: 'recalcKpi' });
     await loadSummary();
     await loadHistory();
+    showAlert('uploadAlerts', 'ダッシュボードを更新しました。', 'success');
   }
 }
 
@@ -1163,6 +1181,23 @@ document.addEventListener('DOMContentLoaded', () => {
     document.querySelectorAll('.upload-card').forEach((c) => c.classList.remove('has-file'));
     document.querySelectorAll('.upload-card .file-name').forEach((el) => { el.textContent = 'クリックまたはドロップで選択'; });
     document.querySelectorAll('.upload-card input[type=file]').forEach((inp) => { inp.value = ''; });
+  });
+
+  document.getElementById('refreshDashboardBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('refreshDashboardBtn');
+    btn.disabled = true;
+    btn.textContent = '更新中...';
+    try {
+      await gasPost({ action: 'recalcKpi' }); // KPI再計算を指示
+      await loadSummary();
+      await loadHistory();
+      showAlert('uploadAlerts', 'ダッシュボードを最新のスプレッドシートデータで更新しました。', 'success');
+    } catch (err) {
+      showAlert('uploadAlerts', '更新に失敗しました: ' + err.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '🔄 ダッシュボード更新';
+    }
   });
 
   /* 初回データ読み込み */
